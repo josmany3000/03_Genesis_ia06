@@ -1,0 +1,27 @@
+# render.yaml
+
+services:
+  - type: web
+    name: video-ai-backend
+    runtime: python
+    plan: free # o 'starter' si necesitas más recursos
+    buildCommand: |
+      pip install -r requirements.txt
+      # Crea el archivo de credenciales de Google desde la variable de entorno
+      echo $GOOGLE_APPLICATION_CREDENTIALS_JSON > /etc/secrets/gcp-credentials.json
+    startCommand: "gunicorn --worker-tmp-dir /dev/shm app:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: GOOGLE_API_KEY
+        fromSecret: true
+      - key: GOOGLE_CLOUD_PROJECT
+        fromSecret: true
+      - key: GCS_BUCKET_NAME
+        fromSecret: true
+      # Variable que contiene el JSON de la cuenta de servicio (la crearás en Render)
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        fromSecret: true
+      # Variable que apunta al archivo físico creado en el buildCommand
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/gcp-credentials.json
