@@ -1,20 +1,24 @@
+# Archivo: render.yaml
+# Este es el plano que le dice a Render cómo construir y ejecutar tu servicio.
+
 services:
   - type: web
     name: video-ai-backend
     runtime: python
     plan: free
     
-    # Comandos para construir tu aplicación
+    # Comando para instalar todas las dependencias de tu proyecto.
     buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
       
-    # Comando para iniciar tu aplicación
+    # Comando para iniciar el servidor web con Gunicorn.
     startCommand: "gunicorn --worker-tmp-dir /dev/shm app:app"
     
-    # Le decimos al plano que busque las claves en un "Grupo de Entorno"
+    # Aquí le indicamos a Render que debe buscar las claves secretas
+    # en el Grupo de Entorno que creaste en el Paso 2.
     envVarGroups:
-      - name: mis-claves-google 
+      - name: mis-claves-google # ¡IMPORTANTE! Este nombre debe ser idéntico al del grupo que creaste.
     
-    # Variables no secretas
+    # Finalmente, definimos la versión de Python.
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
