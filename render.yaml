@@ -2,40 +2,19 @@ services:
   - type: web
     name: video-ai-backend
     runtime: python
-    plan: free # o 'starter' si necesitas más recursos
+    plan: free
     
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-      # Crea el archivo de credenciales de Google a partir de la variable de entorno secreta
-      echo $GOOGLE_APPLICATION_CREDENTIALS_JSON > /etc/secrets/gcp-credentials.json
+    # Comandos para construir tu aplicación
+    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
       
+    # Comando para iniciar tu aplicación
     startCommand: "gunicorn --worker-tmp-dir /dev/shm app:app"
     
+    # Le decimos al plano que busque las claves en un "Grupo de Entorno"
+    envVarGroups:
+      - name: mis-claves-google 
+    
+    # Variables no secretas
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
-        
-      # Esta variable apunta al archivo físico creado en el buildCommand.
-      # La librería de Google la usará para autenticarse.
-      - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/secrets/gcp-credentials.json
-        
-      # --- Las siguientes variables deben ser creadas como "Secrets" en el Dashboard de Render ---
-      
-      # El contenido COMPLETO de tu archivo JSON de credenciales de Google.
-      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
-        fromSecret: true
-        
-      # Tu API Key de Google.
-      - key: GOOGLE_API_KEY
-        fromSecret: true
-        
-      # El ID de tu proyecto de Google Cloud.
-      - key: GOOGLE_CLOUD_PROJECT
-        fromSecret: true
-        
-      # El nombre de tu bucket en Google Cloud Storage.
-      - key: GCS_BUCKET_NAME
-        fromSecret: true
-        
