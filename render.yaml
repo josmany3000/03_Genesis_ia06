@@ -1,24 +1,17 @@
-# Archivo: render.yaml
-# Este es el plano que le dice a Render cómo construir y ejecutar tu servicio.
-
 services:
   - type: web
-    name: video-ai-backend
-    runtime: python
-    plan: free
-    
-    # Comando para instalar todas las dependencias de tu proyecto.
-    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
-      
-    # Comando para iniciar el servidor web con Gunicorn.
-    startCommand: "gunicorn --worker-tmp-dir /dev/shm app:app"
-    
-    # Aquí le indicamos a Render que debe buscar las claves secretas
-    # en el Grupo de Entorno que creaste en el Paso 2.
-    envVarGroups:
-      - name: mis-claves-google # ¡IMPORTANTE! Este nombre debe ser idéntico al del grupo que creaste.
-    
-    # Finalmente, definimos la versión de Python.
+    name: backend-ia-videos
+    env: python
+    region: oregon  # Puedes cambiarlo a 'frankfurt' si estás en Europa
+    plan: free  # O usa 'starter' si quieres evitar que se duerma
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11
+      - key: GOOGLE_API_KEY
+        value: tu_api_key_de_google_aqui
+      - key: GOOGLE_CLOUD_PROJECT
+        value: tu_id_de_proyecto_google_cloud
+      - key: GCS_BUCKET_NAME
+        value: tu_nombre_de_bucket_gcs
+      - key: GOOGLE_APPLICATION_CREDENTIALS_JSON
+        sync: false  # Lo cargarás de forma segura como secreto desde el panel de Render
