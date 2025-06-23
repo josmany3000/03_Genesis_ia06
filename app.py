@@ -1,51 +1,60 @@
 import os
 import uuid
 import json
+import requests # <-- AÑADIDO
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.cloud import texttospeech
 from google.cloud import storage
+import vertexai # <-- AÑADIDO
+from vertexai.preview.vision_models import ImageGenerationModel # <-- AÑADIDO
 
 # --- 1. CONFIGURACIÓN INICIAL ---
 load_dotenv()
 
-# MODIFICACIÓN PARA RENDER: Lógica para manejar credenciales de Google Cloud en producción.
-# En Render, las credenciales se cargarán desde una variable de entorno segura.
-# Esta función asegura que el código funcione tanto localmente como en el servidor.
+# Lógica para manejar credenciales de Google Cloud en producción
 if os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON'):
-    # Si la variable de entorno con el contenido del JSON existe...
     credentials_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
-    # Guardamos este contenido en un archivo temporal que la librería de Google puede leer.
     credentials_path = '/tmp/gcp-credentials.json'
     with open(credentials_path, 'w') as f:
         f.write(credentials_json_str)
-    # Le decimos a las librerías de Google que usen este archivo.
     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = credentials_path
 
 app = Flask(__name__)
 CORS(app)
 
 # Configuración de APIs de Google
-# Esta parte no cambia, ya que las credenciales se configuran a través de las variables de entorno.
 try:
+    # Configuración de Gemini y Clientes de Cloud
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
     text_to_speech_client = texttospeech.TextToSpeechClient()
     storage_client = storage.Client(project=os.getenv("GOOGLE_CLOUD_PROJECT"))
     GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME")
+
+    # --- NUEVO: Inicialización de Vertex AI ---
+    # Se usa para la generación de imágenes con el modelo Imagen 2.
+    # Requiere el ID del proyecto y una región (ej. 'us-central1').
+    vertexai.init(project=os.getenv("GOOGLE_CLOUD_PROJECT"), location=os.getenv("GCP_REGION", "us-central1"))
+
 except Exception as e:
     print(f"Error al configurar los clientes de Google: {e}")
 
-model = genai.GenerativeModel('gemini-1.5-flash')
+# Modelos de IA
+model_text = genai.GenerativeModel('gemini-1.5-flash')
+# --- NUEVO: Se carga el modelo de generación de imágenes ---
+model_image = ImageGenerationModel.from_pretrained("imagegeneration@006")
 
-# --- 2. FUNCIONES AUXILIARES (Sin cambios) ---
+
+# --- 2. FUNCIONES AUXILIARES ---
 
 def upload_to_gcs(file_stream, destination_blob_name, content_type='audio/mpeg'):
     """Sube un stream de archivo a un bucket de GCS y lo hace público."""
     try:
         bucket = storage_client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(destination_blob_name)
+        # Sube el contenido desde el string de bytes
         blob.upload_from_string(file_stream, content_type=content_type)
         blob.make_public()
         return blob.public_url
@@ -63,11 +72,10 @@ def safe_json_parse(text):
         print(f"Texto problemático: {text}")
         return None
 
-# --- 3. ENDPOINTS DE LA API (Sin cambios en la lógica) ---
+# --- 3. ENDPOINTS DE LA API ---
 
 @app.route("/")
 def index():
-    # Un endpoint simple para verificar que el servicio está corriendo
     return "Backend de IA para Videos - ¡Corriendo!"
 
 @app.route('/api/generate-initial-content', methods=['POST'])
@@ -86,7 +94,7 @@ def generate_initial_content():
     Asegúrate de que la salida sea únicamente el objeto JSON válido y nada más.
     """
     try:
-        response = model.generate_content(prompt)
+        response = model_text.generate_content(prompt)
         parsed_json = safe_json_parse(response.text)
         if parsed_json and 'scenes' in parsed_json:
             for i, scene in enumerate(parsed_json['scenes']):
@@ -104,19 +112,62 @@ def regenerate_scene_part():
     part = data.get('part')
     if not scene or not part:
         return jsonify({"error": "Faltan datos de escena o parte a regenerar"}), 400
+
     if part == 'script':
         prompt = f"Eres un guionista. Reescribe el siguiente guion para una escena de video de forma creativa, manteniendo la idea central. Guion original: '{scene.get('script')}'. Devuelve solo el texto del nuevo guion, sin comillas ni texto introductorio."
         try:
-            response = model.generate_content(prompt)
+            response = model_text.generate_content(prompt)
             return jsonify({"newScript": response.text.strip()})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+            
+    # --- SECCIÓN COMPLETAMENTE ACTUALIZADA ---
     elif part == 'media':
-        print("ADVERTENCIA: La generación de imágenes no está implementada. Se devuelve un placeholder.")
-        resolucion = data.get('config', {}).get('resolucion', '1920x1080')
-        width, height = resolucion.split('x')
-        placeholder_url = f"https://via.placeholder.com/{width}x{height}?text=IA+Fallback+Image"
-        return jsonify({"newImageUrl": placeholder_url, "newVideoUrl": None})
+        try:
+            print("Iniciando generación de imagen real con Vertex AI...")
+            
+            # 1. Preparar el prompt para la imagen
+            script_text = scene.get('script', 'una imagen abstracta')
+            # Mejoramos el prompt para obtener mejores resultados
+            image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {script_text}"
+
+            # 2. Obtener la resolución/aspect ratio
+            # El frontend envía '16:9' o '9:16'
+            aspect_ratio = data.get('config', {}).get('resolucion', '16:9')
+
+            # 3. Generar la imagen con Imagen 2
+            images = model_image.generate_images(
+                prompt=image_prompt,
+                number_of_images=1,
+                aspect_ratio=aspect_ratio,
+                # Puedes añadir un prompt negativo si quieres evitar ciertos elementos
+                # negative_prompt="text, watermark, blurry"
+            )
+
+            # La API devuelve una URL temporal a la imagen generada
+            temp_image_url = images[0]._image_bytes._blob.public_url
+            
+            # 4. Descargar la imagen de la URL temporal
+            print(f"Descargando imagen desde la URL temporal de Vertex: {temp_image_url}")
+            response = requests.get(temp_image_url)
+            response.raise_for_status() # Lanza un error si la descarga falla
+            image_bytes = response.content
+
+            # 5. Subir la imagen a nuestro propio bucket de GCS para tener una URL permanente
+            image_filename = f"image_{uuid.uuid4()}.png"
+            print(f"Subiendo imagen a GCS como: {image_filename}")
+            public_gcs_url = upload_to_gcs(image_bytes, image_filename, 'image/png')
+
+            if not public_gcs_url:
+                raise Exception("Fallo al subir la imagen generada a Google Cloud Storage.")
+
+            print(f"Imagen generada y almacenada con éxito: {public_gcs_url}")
+            return jsonify({"newImageUrl": public_gcs_url, "newVideoUrl": None})
+
+        except Exception as e:
+            print(f"ERROR en la generacion de media: {str(e)}")
+            return jsonify({"error": f"Error al generar imagen con IA: {str(e)}"}), 500
+            
     return jsonify({"error": "Parte no válida para regenerar"}), 400
 
 @app.route('/api/generate-and-save-audio', methods=['POST'])
@@ -166,7 +217,7 @@ def generate_seo():
     Asegúrate de que la salida sea únicamente el objeto JSON válido y nada más.
     """
     try:
-        response = model.generate_content(prompt)
+        response = model_text.generate_content(prompt)
         parsed_json = safe_json_parse(response.text)
         if parsed_json:
             return jsonify(parsed_json)
@@ -176,9 +227,6 @@ def generate_seo():
         return jsonify({"error": str(e)}), 500
 
 # --- 4. EJECUCIÓN DEL SERVIDOR ---
-# MODIFICACIÓN PARA RENDER: Esta sección ahora solo se usa para desarrollo local.
-# En producción, Gunicorn ejecutará la 'app' directamente.
 if __name__ == '__main__':
-    # El puerto se obtiene de la variable de entorno PORT, con 5001 como default para local.
     port = int(os.environ.get('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=False) # Debug se establece en False para producción
+    app.run(host='0.0.0.0', port=port, debug=False)
