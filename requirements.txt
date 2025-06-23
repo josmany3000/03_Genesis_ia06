@@ -1,7 +1,8 @@
-Flask==2.3.2
-flask-cors==3.0.10
-python-dotenv==1.0.1
-google-cloud-texttospeech==2.14.1
-google-cloud-storage==2.14.0
-google-generativeai==0.5.4
-gunicorn==21.2.0
+flask
+flask-cors
+python-dotenv
+google-generativeai
+google-cloud-texttospeech
+google-cloud-storage
+google-cloud-aiplatform
+requests
