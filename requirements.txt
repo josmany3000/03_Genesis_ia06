@@ -6,3 +6,4 @@ google-cloud-texttospeech
 google-cloud-storage
 google-cloud-aiplatform
 requests
+gunicorn==21.2.0
