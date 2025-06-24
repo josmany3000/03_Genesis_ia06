@@ -22,6 +22,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
 )
 
+# Carga de credenciales de GCP desde variables de entorno para Render/Heroku
 if os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON'):
     credentials_json_str = os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON')
     credentials_path = f'/tmp/{uuid.uuid4()}_gcp-credentials.json'
@@ -73,8 +74,10 @@ def retry_on_failure(retries=3, delay=2, backoff=2):
 # --- 3. FUNCIONES AUXILIARES ---
 
 @retry_on_failure(retries=3, delay=2)
-def upload_to_gcs(file_stream, destination_blob_name, content_type='audio/mpeg'):
+def upload_to_gcs(file_stream, destination_blob_name, content_type):
     logging.info(f"Iniciando subida a GCS. Bucket: {GCS_BUCKET_NAME}, Destino: {destination_blob_name}")
+    if not GCS_BUCKET_NAME:
+        raise ValueError("El nombre del bucket de GCS no está configurado.")
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob(destination_blob_name)
     blob.upload_from_string(file_stream, content_type=content_type)
@@ -90,23 +93,33 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-@retry_on_failure(retries=3, delay=2, backoff=2)
+@retry_on_failure(retries=3, delay=2)
+def _generate_and_upload_image(scene_script, aspect_ratio):
+    """Función auxiliar para generar una imagen y subirla a GCS."""
+    logging.info(f"Generando imagen para el guion: '{scene_script[:50]}...'")
+    image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {scene_script}"
+    
+    images = model_image.generate_images(
+        prompt=image_prompt,
+        number_of_images=1,
+        aspect_ratio=aspect_ratio,
+        negative_prompt="text, watermark, logo, blurry, words, letters, signature, deformed"
+    )
+    
+    public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
+    return public_gcs_url
+
+@retry_on_failure(retries=3, delay=2)
 def _generate_audio_with_api(ssml_script, voice_id):
     """Función interna que procesa SSML para generar audio."""
     logging.info(f"Llamando a la API de Google TTS con SSML y voz '{voice_id}'.")
-    
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
-    
     language_code = '-'.join(voice_id.split('-', 2)[:2])
     voice = texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_id)
     audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
-    
     response = text_to_speech_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
     logging.info("Respuesta de la API de TTS recibida.")
-
-    file_name = f"audio_{uuid.uuid4()}.mp3"
-    public_url = upload_to_gcs(response.audio_content, file_name, 'audio/mpeg')
-    
+    public_url = upload_to_gcs(response.audio_content, f"audio/audio_{uuid.uuid4()}.mp3", 'audio/mpeg')
     return public_url
 
 
@@ -114,111 +127,110 @@ def _generate_audio_with_api(ssml_script, voice_id):
 
 @app.route("/")
 def index():
-    return "Backend de IA para Videos - ¡Corriendo con lógica de audio unificado y SSML dinámico!"
+    return "Backend de IA para Videos v2.0 - ¡Generación Unificada!"
 
 # =================================================================================
-# ### CAMBIO 1: El guion inicial ahora se genera como TEXTO PLANO ###
+# ### CAMBIO 1: Endpoint de generación inicial UNIFICADO (Guion + Imágenes) ###
 # =================================================================================
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
         data = request.get_json()
-        logging.info(f"Recibida solicitud para generar guion con datos: {data}")
+        logging.info(f"Recibida solicitud para generar contenido completo con datos: {data}")
 
+        # --- Parte 1: Generar el guion de texto ---
         duracion_a_escenas = {"50": 4, "120": 6, "180": 8, "300": 10, "600": 15}
-        duracion_seleccionada = str(data.get('duracionVideo', '50'))
-        numero_de_escenas = duracion_a_escenas.get(duracion_seleccionada, 4)
+        numero_de_escenas = duracion_a_escenas.get(str(data.get('duracionVideo', '50')), 4)
         
-        cantidad_ganchos = int(data.get('cantidadGanchos', 0))
-        usar_tendencias = data.get('usarTendencias', False)
-        nicho = data.get('nicho', 'tecnologia')
-        
-        instruccion_ganchos = ""
-        if cantidad_ganchos > 0:
-            instruccion_ganchos = f"""- Ganchos Virales: Antes de las escenas principales, genera EXACTAMENTE {cantidad_ganchos} escenas 'gancho' muy cortas e impactantes. Su 'id' debe ser "hook-1", "hook-2", etc."""
-
-        instruccion_tendencias = ""
-        if usar_tendencias:
-            instruccion_tendencias = f"""- Relevancia Cultural: Incorpora temas o formatos de tendencia actual en redes sociales para el nicho de '{nicho}'."""
-
         prompt = f"""
-        Eres un guionista experto para videos virales de redes sociales. Tu tarea es crear un guion completo siguiendo estas instrucciones.
-
-        **Contexto del Video:**
-        - Tema Principal: "{data.get('guionPersonalizado')}"
-        - Nicho: "{nicho}"
-        - Idioma del Guion: "{data.get('idioma')}"
-
-        **Requisitos de Estructura (MUY IMPORTANTE):**
-        - Número de Escenas Principales: Debes generar EXACTAMENTE {numero_de_escenas} escenas principales.
-        {instruccion_ganchos}
-        {instruccion_tendencias}
-        - ¡Importante! El guion para cada escena debe ser **texto plano, claro y conciso**. No incluyas ninguna etiqueta como <speak> o <prosody>.
-
+        Eres un guionista experto para videos virales de redes sociales. Tu tarea es crear un guion completo que sea atractivo, coherente y fácil de leer en voz alta.
+        **Contexto:** Tema: "{data.get('guionPersonalizado')}", Nicho: "{data.get('nicho')}", Idioma: "{data.get('idioma')}".
+        **Estructura:** Genera EXACTAMENTE {numero_de_escenas} escenas.
+        **Reglas del Guion (OBLIGATORIO):**
+        1. **Formato Narrativo:** Cada guion debe ser un párrafo completo, no una lista de palabras clave. Debe leerse como si alguien lo estuviera narrando.
+        2. **Texto Limpio:** El guion para cada escena debe ser ÚNICAMENTE texto plano. No incluyas NINGUNA etiqueta como `<speak>` o `(sonido de...)`.
         **Formato de Salida Obligatorio:**
-        La respuesta DEBE SER ÚNICAMENTE un objeto JSON válido. El JSON debe tener una única clave raíz "scenes". El valor de "scenes" es un array de objetos. Cada objeto debe contener:
-        1. "id": Un identificador único (ej: "hook-1", "scene-1").
-        2. "script": El guion de la escena como una cadena de **TEXTO PLANO**.
-
-        Genera el guion ahora.
+        La respuesta DEBE SER ÚNICAMENTE un objeto JSON válido con una clave "scenes", que es un array de objetos. Cada objeto debe tener "id" y "script".
+        **Ejemplo de un "script" correcto:** "Descubrieron una misteriosa señal proveniente del fondo del océano. Nadie sabía qué la causaba."
+        **Ejemplo de un "script" INCORRECTO:** "- Señal misteriosa - Océano profundo"
+        Genera el guion ahora, siguiendo todas las reglas estrictamente.
         """
 
-        logging.info("Enviando prompt de TEXTO PLANO a Gemini.")
+        logging.info("Enviando prompt de guion a Gemini.")
         response = model_text.generate_content(prompt)
         parsed_json = safe_json_parse(response.text)
 
-        if parsed_json and 'scenes' in parsed_json:
-            for i, scene in enumerate(parsed_json['scenes']):
-                scene['id'] = scene.get('id', f'scene-{uuid.uuid4()}')
-            logging.info(f"Guion de texto plano generado con {len(parsed_json['scenes'])} escenas.")
-            return jsonify(parsed_json)
-        else:
+        if not (parsed_json and 'scenes' in parsed_json):
             logging.error(f"La respuesta del modelo no tuvo el formato JSON esperado. Respuesta: {response.text}")
             return jsonify({"error": "La IA no pudo generar un guion con el formato correcto. Intenta de nuevo."}), 500
+
+        # --- Parte 2: Generar una imagen para CADA escena del guion ---
+        logging.info(f"Guion generado con {len(parsed_json['scenes'])} escenas. Ahora generando imágenes para cada una.")
+        
+        aspect_ratio = data.get('resolucionVideo', '16:9')
+        scenes_con_media = []
+
+        for scene in parsed_json['scenes']:
+            scene['id'] = scene.get('id', f'scene-{uuid.uuid4()}')
+            try:
+                # Llama a la función auxiliar para generar y subir la imagen
+                image_url = _generate_and_upload_image(scene['script'], aspect_ratio)
+                scene['imageUrl'] = image_url
+                scene['videoUrl'] = None # No hay video en la generación inicial
+            except Exception as e:
+                logging.error(f"No se pudo generar imagen para la escena {scene['id']}: {e}", exc_info=True)
+                # Si falla una imagen, asigna una de marcador de posición para no detener todo el proceso
+                scene['imageUrl'] = f"https://via.placeholder.com/{'1080x1920' if aspect_ratio == '9:16' else '1920x1080'}?text=Error+al+generar+imagen"
+                scene['videoUrl'] = None
+            scenes_con_media.append(scene)
+
+        logging.info("Proceso de generación unificada completado.")
+        return jsonify({"scenes": scenes_con_media})
             
     except Exception as e:
         logging.error("Error inesperado en generate_initial_content.", exc_info=True)
-        return jsonify({"error": "Ocurrió un error interno al generar el guion."}), 500
+        return jsonify({"error": f"Ocurrió un error interno al generar el contenido: {e}"}), 500
 
 
+# =================================================================================
+# ### CAMBIO 2: Endpoint de regeneración más robusto ###
+# =================================================================================
 @app.route('/api/regenerate-scene-part', methods=['POST'])
 def regenerate_scene_part():
     data = request.get_json()
     scene = data.get('scene')
-    part = data.get('part')
+    part_to_regenerate = data.get('part')
+    config = data.get('config') # La configuración inicial (resolución, etc.)
 
-    if not scene or not part:
-        return jsonify({"error": "Faltan datos de escena o parte a regenerar"}), 400
+    if not all([scene, part_to_regenerate, config]):
+        return jsonify({"error": "Faltan datos de escena, parte a regenerar o configuración"}), 400
 
-    if part == 'script':
+    if part_to_regenerate == 'script':
         try:
-            prompt = f"Eres un guionista. Reescribe el siguiente guion para una escena de video de forma creativa, manteniendo la idea central: '{scene.get('script')}'. Devuelve solo el texto del nuevo guion, sin comillas ni texto adicional."
+            logging.info(f"Regenerando guion para escena: {scene.get('id')}")
+            prompt = f"Eres un guionista experto. Reescribe el siguiente guion para una escena de video de forma creativa y concisa, manteniendo la idea central: '{scene.get('script')}'. Devuelve solo el nuevo texto del guion, sin comillas ni explicaciones."
             response = model_text.generate_content(prompt)
-            # ### CAMBIO: Ahora devuelve texto plano, como debe ser.
-            return jsonify({"newScript": response.text.strip()})
+            new_script = response.text.strip()
+            return jsonify({"newScript": new_script})
         except Exception as e:
-            logging.error("Error al regenerar guion: %s", e)
-            return jsonify({"error": "Error al contactar al modelo de IA."}), 500
+            logging.error(f"Error al regenerar guion: {e}", exc_info=True)
+            return jsonify({"error": "Error al contactar al modelo de IA para regenerar el guion."}), 500
 
-    elif part == 'media':
+    elif part_to_regenerate == 'media':
         try:
-            script_text = scene.get('script', 'una imagen abstracta')
-            image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {script_text}"
-            aspect_ratio = data.get('config', {}).get('resolucion', '16:9')
-            images = model_image.generate_images(
-                prompt=image_prompt, number_of_images=1, aspect_ratio=aspect_ratio,
-                negative_prompt="text, watermark, blurry, words, letters"
-            )
-            public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"image_{uuid.uuid4()}.png", 'image/png')
-            return jsonify({"newImageUrl": public_gcs_url, "newVideoUrl": None})
+            logging.info(f"Regenerando media para escena: {scene.get('id')}")
+            aspect_ratio = config.get('resolucion', '16:9')
+            # Llama a la misma función auxiliar para mantener el código consistente
+            new_image_url = _generate_and_upload_image(scene.get('script', 'una imagen abstracta'), aspect_ratio)
+            return jsonify({"newImageUrl": new_image_url, "newVideoUrl": None})
         except Exception as e:
-            logging.error("Error al regenerar media: %s", e)
-            return jsonify({"error": f"Error al generar imagen con IA: {str(e)}"}), 500
+            logging.error(f"Error al regenerar media: {e}", exc_info=True)
+            return jsonify({"error": f"Error al generar la nueva imagen con IA: {str(e)}"}), 500
             
-    return jsonify({"error": "Parte no válida para regenerar"}), 400
+    return jsonify({"error": "Parte no válida para regenerar. Debe ser 'script' o 'media'."}), 400
 
 # =================================================================================
-# ### CAMBIO 2: Endpoint de audio ahora es inteligente. Convierte texto plano a SSML ###
+# ### CAMBIO 3: Endpoint de audio con prompt SSML mejorado ###
 # =================================================================================
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
@@ -233,39 +245,33 @@ def generate_full_audio():
     try:
         logging.info(f"Iniciando conversión de texto plano a SSML para el nicho: {nicho}")
 
-        # Prompt para que la IA convierta el texto plano en un guion con dirección de voz (SSML)
         ssml_prompt = f"""
-        Eres un director de voz experto. Tu tarea es tomar un guion de texto plano y enriquecerlo con etiquetas SSML para darle vida, ritmo y el tono adecuado para un video viral.
+        Eres un director de voz experto para videos virales. Tu misión es tomar un guion de texto plano y enriquecerlo con etiquetas SSML para darle vida, ritmo y el tono adecuado.
 
         **Instrucciones:**
         - **Nicho del Video:** {nicho}
-        - **Guion de Texto Plano:**
+        - **Guion de Texto Plano a Convertir:**
         ---
         {plain_text_script}
         ---
-
-        **Tu Misión:**
-        1.  Analiza el guion y el nicho.
-        2.  Inserta etiquetas SSML de forma creativa y profesional. Usa `<break time="..."/>` para pausas dramáticas o para separar ideas, `<emphasis level="..."/>` para resaltar palabras clave, y `<prosody rate="..." pitch="...">` para controlar el ritmo y el tono.
-            - **Misterio/Terror:** Usa pausas largas (ej. `<break time="700ms"/>`), ritmo lento (`rate="slow"`) y tono grave (`pitch="-15%"`).
-            - **Finanzas/Tecnología:** Usa un ritmo claro, seguro (`rate="medium"`) y enfatiza (`emphasis`) conceptos importantes.
-            - **Documental/Historia:** Usa un tono narrativo, calmado (`rate="slow"`) y respetuoso, con pausas claras entre párrafos.
-        3.  Asegúrate de que todo el resultado final esté envuelto en un único par de etiquetas `<speak>...</speak>`.
-
+        **Tu Tarea:**
+        1.  Analiza el guion y el nicho para decidir el tono emocional.
+        2.  Inserta etiquetas SSML de forma creativa. Usa `<break time="..."/>` para pausas, `<emphasis level="..."/>` para resaltar palabras, y `<prosody rate="..." pitch="...">` para controlar el ritmo y tono.
+            - **Ej. Misterio/Terror:** Usa pausas largas (`<break time="800ms"/>`), ritmo lento (`rate="slow"`), y tono grave (`pitch="-10%"`).
+            - **Ej. Finanzas/Tecnología:** Usa un ritmo seguro (`rate="medium"`), claro, y enfatiza (`emphasis`) conceptos clave.
+            - **Ej. Comedia:** Usa cambios de ritmo (`rate="fast"`) y tono (`pitch="+15%"`).
+        3.  El resultado final DEBE estar envuelto en un único par de etiquetas `<speak>...</speak>`.
         **Formato de Salida Obligatorio:**
-        Devuelve **ÚNICAMENTE** la cadena de texto con el guion completo en formato SSML. No añadas explicaciones ni texto adicional.
+        Devuelve ÚNICAMENTE la cadena de texto con el guion completo en formato SSML. No añadas explicaciones, comentarios, ni la palabra "ssml".
         """
         
         response_ssml = model_text.generate_content(ssml_prompt)
         ssml_script = response_ssml.text.strip().replace("```ssml", "").replace("```", "")
 
-        # Validar que la respuesta sea un SSML básico
         if not ssml_script.startswith('<speak>') or not ssml_script.endswith('</speak>'):
             logging.warning(f"La IA no devolvió un SSML válido. Envolviendo manualmente. Respuesta: {ssml_script[:200]}")
             ssml_script = f"<speak>{ssml_script}</speak>"
             
-        logging.info("SSML generado exitosamente. Enviando a la API de TTS.")
-        
         public_url = _generate_audio_with_api(ssml_script, voice_id)
         logging.info(f"Audio completo generado exitosamente en {public_url}")
         
@@ -275,8 +281,7 @@ def generate_full_audio():
         logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
         return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
 
-
-# ### CAMBIO 3: Endpoint obsoleto eliminado y voice-sample simplificado ###
+# Endpoint para la muestra de voz (sin cambios significativos)
 @app.route('/api/voice-sample', methods=['POST'])
 def generate_voice_sample():
     data = request.get_json()
@@ -284,7 +289,6 @@ def generate_voice_sample():
     if not voice_id:
         return jsonify({"error": "Se requiere un ID de voz"}), 400
     try:
-        # Usa un SSML simple y predefinido para la muestra
         sample_ssml = "<speak>Hola, esta es una prueba de la voz seleccionada para la narración.</speak>"
         public_url = _generate_audio_with_api(sample_ssml, voice_id)
         return jsonify({"audioUrl": public_url})
@@ -294,6 +298,7 @@ def generate_voice_sample():
         logging.error("Error al generar muestra de voz: %s", e)
         return jsonify({"error": f"No se pudo generar la muestra de voz: {str(e)}"}), 500
 
+# Endpoint de SEO (sin cambios)
 @app.route('/api/generate-seo', methods=['POST'])
 def generate_seo():
     try:
@@ -321,4 +326,4 @@ def generate_seo():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-    
+
