@@ -91,14 +91,13 @@ def safe_json_parse(text):
         return None
 
 # =================================================================================
-# ### CAMBIO 1: La función de audio ahora procesa SSML ###
+# ### La función de audio ya procesaba SSML, lo cual es perfecto ###
 # =================================================================================
 @retry_on_failure(retries=3, delay=2, backoff=2)
 def _generate_audio_with_api(script, voice_id):
-    """Función interna que ahora procesa SSML para generar audio con tono y ritmo."""
+    """Función interna que procesa SSML para generar audio con tono y ritmo."""
     logging.info(f"Llamando a la API de Google TTS con SSML y voz '{voice_id}'.")
     
-    # Se le indica a la API que el input es SSML, no texto plano.
     synthesis_input = texttospeech.SynthesisInput(ssml=script)
     
     language_code = '-'.join(voice_id.split('-', 2)[:2])
@@ -118,10 +117,10 @@ def _generate_audio_with_api(script, voice_id):
 
 @app.route("/")
 def index():
-    return "Backend de IA para Videos - ¡Corriendo con lógica de guion y SSML mejorada!"
+    return "Backend de IA para Videos - ¡Corriendo con lógica de audio unificado!"
 
 # =================================================================================
-# ### CAMBIO 2: La generación de guion ahora incluye instrucciones SSML ###
+# ### La generación de guion con SSML ya estaba bien, no necesita cambios ###
 # =================================================================================
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
@@ -132,7 +131,8 @@ def generate_initial_content():
         duracion_a_escenas = {"50": 4, "120": 6, "180": 8, "300": 10, "600": 15}
         duracion_seleccionada = str(data.get('duracionVideo', '50'))
         numero_de_escenas = duracion_a_escenas.get(duracion_seleccionada, 4)
-
+        
+        # ... (el resto de la lógica de esta función es idéntica y correcta)
         cantidad_ganchos = int(data.get('cantidadGanchos', 0))
         usar_tendencias = data.get('usarTendencias', False)
         nicho = data.get('nicho', 'tecnologia')
@@ -145,7 +145,6 @@ def generate_initial_content():
         if usar_tendencias:
             instruccion_tendencias = f"""- Relevancia Cultural: Incorpora temas o formatos de tendencia actual en redes sociales para el nicho de '{nicho}'."""
 
-        # Instrucción sobre cómo aplicar SSML según el nicho
         instruccion_ssml_por_nicho = f"""
         - Dirección de Voz (SSML): Enriquece el guion con etiquetas SSML para que la narración se adapte al nicho de '{nicho}'.
           - Si el nicho es 'misterio' o 'terror', usa pausas <break time="600ms"/>, un ritmo lento <prosody rate="slow"> y un tono grave <prosody pitch="-15%"> en momentos clave.
@@ -193,14 +192,12 @@ def generate_initial_content():
         logging.error("Error inesperado en generate_initial_content.", exc_info=True)
         return jsonify({"error": "Ocurrió un error interno al generar el guion."}), 500
 
-# El resto de los endpoints no necesitan cambios
 @app.route('/api/regenerate-scene-part', methods=['POST'])
 def regenerate_scene_part():
-    # Esta función podría mejorarse en el futuro para regenerar también con SSML, 
-    # pero por ahora la dejamos como está para no complicar la regeneración individual.
     data = request.get_json()
     scene = data.get('scene')
     part = data.get('part')
+    # ... (esta función no necesita cambios)
     if not scene or not part:
         return jsonify({"error": "Faltan datos de escena o parte a regenerar"}), 400
 
@@ -229,6 +226,33 @@ def regenerate_scene_part():
             return jsonify({"error": f"Error al generar imagen con IA: {str(e)}"}), 500
     return jsonify({"error": "Parte no válida para regenerar"}), 400
 
+# =================================================================================
+# ### CAMBIO: NUEVO ENDPOINT PARA GENERAR EL AUDIO COMPLETO ###
+# =================================================================================
+@app.route('/api/generate-full-audio', methods=['POST'])
+def generate_full_audio():
+    data = request.get_json()
+    ssml_script = data.get('ssml')
+    voice_id = data.get('voice', 'es-US-Neural2-A') # Voz por defecto
+    
+    if not ssml_script:
+        return jsonify({"error": "El guion SSML es requerido"}), 400
+    
+    try:
+        # Asegurarnos de que el script siempre tenga etiquetas <speak> para evitar errores
+        if not ssml_script.strip().startswith('<speak>'):
+            ssml_script = f'<speak>{ssml_script}</speak>'
+            
+        public_url = _generate_audio_with_api(ssml_script, voice_id)
+        logging.info(f"Audio completo generado exitosamente en {public_url}")
+        return jsonify({"audioUrl": public_url})
+    except Exception as e:
+        logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
+        if "InvalidArgument" in str(e) or "does not exist" in str(e):
+             return jsonify({"error": f"La voz seleccionada ('{voice_id}') no es válida."}), 400
+        return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
+
+
 @app.route('/api/generate-and-save-audio', methods=['POST'])
 def generate_audio():
     data = request.get_json()
@@ -237,7 +261,6 @@ def generate_audio():
     if not script:
         return jsonify({"error": "El guion (script) es requerido"}), 400
     try:
-        # Asegurarnos de que el script siempre tenga etiquetas <speak> para evitar errores
         if not script.strip().startswith('<speak>'):
             script = f'<speak>{script}</speak>'
         public_url = _generate_audio_with_api(script, voice_id)
@@ -247,6 +270,7 @@ def generate_audio():
              return jsonify({"error": f"La voz seleccionada ('{voice_id}') no es válida."}), 400
         return jsonify({"error": f"No se pudo generar el audio: {str(e)}"}), 500
 
+# El resto de endpoints (voice-sample, generate-seo) no necesitan cambios.
 @app.route('/api/voice-sample', methods=['POST'])
 def generate_voice_sample():
     return generate_audio()
