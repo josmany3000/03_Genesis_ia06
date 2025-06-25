@@ -4,7 +4,7 @@ import json
 import requests
 import logging
 import time
-import threading # Importamos threading para tareas en segundo plano
+import threading 
 from functools import wraps
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -55,7 +55,7 @@ model_image = ImageGenerationModel.from_pretrained("imagegeneration@006")
 
 
 # --- 2. DECORADOR DE REINTENTOS ---
-def retry_on_failure(retries=3, delay=5, backoff=2): # Aumentamos el delay inicial a 5 segundos
+def retry_on_failure(retries=3, delay=5, backoff=2):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -74,7 +74,7 @@ def retry_on_failure(retries=3, delay=5, backoff=2): # Aumentamos el delay inici
     return decorator
 
 # --- 3. FUNCIONES AUXILIARES ---
-@retry_on_failure
+@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
 def upload_to_gcs(file_stream, destination_blob_name, content_type):
     logging.info(f"Iniciando subida a GCS. Bucket: {GCS_BUCKET_NAME}, Destino: {destination_blob_name}")
     if not GCS_BUCKET_NAME:
@@ -94,7 +94,7 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-@retry_on_failure
+@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
 def _generate_and_upload_image(scene_script, aspect_ratio):
     logging.info(f"Generando imagen para el guion: '{scene_script[:50]}...' con aspect ratio: {aspect_ratio}")
     image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {scene_script}"
@@ -109,7 +109,7 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
 
-@retry_on_failure
+@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
 def _generate_audio_with_api(ssml_script, voice_id):
     logging.info(f"Llamando a la API de Google TTS con SSML y voz '{voice_id}'.")
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
@@ -123,7 +123,6 @@ def _generate_audio_with_api(ssml_script, voice_id):
 
 
 # --- 4. TRABAJADOR DE FONDO PARA GENERACIÓN DE IMÁGENES ---
-
 def _perform_image_generation(job_id, scenes, aspect_ratio):
     total_scenes = len(scenes)
     scenes_con_media = []
@@ -146,13 +145,9 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
                 scene['videoUrl'] = None
             scenes_con_media.append(scene)
             
-            # --- INICIO DE LA SOLUCIÓN DE "PACIENCIA" ---
-            # Pausa de 10 segundos entre cada imagen para respetar la cuota de la API.
-            # Esto evita el error "429 Quota Exceeded".
-            if i < total_scenes - 1: # No esperar después de la última imagen
+            if i < total_scenes - 1:
                 logging.info(f"Trabajo {job_id}: Pausando por 10 segundos para respetar la cuota de la API.")
                 time.sleep(10)
-            # --- FIN DE LA SOLUCIÓN ---
         
         JOBS[job_id]['status'] = 'completed'
         JOBS[job_id]['result'] = {"scenes": scenes_con_media}
@@ -167,7 +162,7 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v2.4 - Manejo de Cuotas y en Español"
+    return "Backend de IA para Videos v2.5 - Estable y Corregido"
 
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
