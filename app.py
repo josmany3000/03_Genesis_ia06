@@ -64,6 +64,9 @@ def retry_on_failure(retries=3, delay=5, backoff=2):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
+                    if isinstance(e, IndexError):
+                         logging.error(f"Error de IndexError en {func.__name__}. No se reintentará. Causa probable: contenido bloqueado por la API.")
+                         raise e
                     logging.warning(f"Intento {i + 1}/{retries} para {func.__name__} falló: {e}. Reintentando en {current_delay}s...")
                     if i == retries - 1:
                         logging.error(f"Todos los {retries} intentos para {func.__name__} fallaron.", exc_info=True)
@@ -74,7 +77,7 @@ def retry_on_failure(retries=3, delay=5, backoff=2):
     return decorator
 
 # --- 3. FUNCIONES AUXILIARES ---
-@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
+@retry_on_failure()
 def upload_to_gcs(file_stream, destination_blob_name, content_type):
     logging.info(f"Iniciando subida a GCS. Bucket: {GCS_BUCKET_NAME}, Destino: {destination_blob_name}")
     if not GCS_BUCKET_NAME:
@@ -94,22 +97,56 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
+# --- INICIO DE LA NUEVA MECÁNICA ---
+@retry_on_failure()
+def _get_keywords_for_image_prompt(script_text):
+    """Usa la IA de texto para extraer palabras clave seguras y visuales del guion."""
+    prompt = f"""
+    Analiza el siguiente texto de una escena de video. Extrae de 4 a 5 palabras clave (keywords) que mejor describan visualmente la escena.
+
+    **Reglas Importantes:**
+    1.  Las palabras clave deben ser seguras y neutrales, aptas para un generador de imágenes con filtros de seguridad estrictos.
+    2.  Enfócate en objetos, ambientes y conceptos visuales (ej: 'nave espacial, desierto, noche, estrellas, misterio').
+    3.  Evita nombres propios o acciones complejas que puedan confundir a la IA de imágenes.
+    4.  Devuelve únicamente las palabras clave en español, separadas por comas. NADA MÁS.
+
+    **Texto de la Escena:**
+    ---
+    {script_text}
+    ---
+    """
+    response = model_text.generate_content(prompt)
+    keywords = response.text.strip().replace("`", "")
+    logging.info(f"Keywords generadas para el guion: '{keywords}'")
+    return keywords
+
+@retry_on_failure()
 def _generate_and_upload_image(scene_script, aspect_ratio):
-    logging.info(f"Generando imagen para el guion: '{scene_script[:50]}...' con aspect ratio: {aspect_ratio}")
-    image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {scene_script}"
+    # Paso 1: Usar la IA para obtener palabras clave seguras del guion.
+    keywords = _get_keywords_for_image_prompt(scene_script)
+    
+    logging.info(f"Generando imagen desde keywords: '{keywords}' con aspect ratio: {aspect_ratio}")
+    
+    # Paso 2: Construir un prompt de imagen limpio usando solo las palabras clave.
+    image_prompt = f"cinematic, photorealistic, high detail image of: {keywords}"
     
     images = model_image.generate_images(
         prompt=image_prompt,
         number_of_images=1,
         aspect_ratio=aspect_ratio,
-        negative_prompt="text, watermark, logo, blurry, words, letters, signature, deformed"
+        negative_prompt="text, watermark, logo, blurry, words, letters, signature"
     )
     
+    if not images:
+        logging.warning(f"La API no devolvió imágenes para las keywords: '{keywords}'.")
+        raise IndexError("La lista de imágenes generadas está vacía.")
+
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
+# --- FIN DE LA NUEVA MECÁNICA ---
 
-@retry_on_failure() # SOLUCIÓN: Se añaden paréntesis
+
+@retry_on_failure()
 def _generate_audio_with_api(ssml_script, voice_id):
     logging.info(f"Llamando a la API de Google TTS con SSML y voz '{voice_id}'.")
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
@@ -132,16 +169,16 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
             JOBS[job_id]['status'] = 'processing'
             JOBS[job_id]['progress'] = f"{i + 1}/{total_scenes}"
             
-            logging.info(f"Trabajo {job_id}: Generando imagen {i+1}/{total_scenes}")
+            logging.info(f"Trabajo {job_id}: Procesando imagen {i+1}/{total_scenes}")
             scene['id'] = scene.get('id', f'scene-{uuid.uuid4()}')
             try:
                 image_url = _generate_and_upload_image(scene['script'], aspect_ratio)
                 scene['imageUrl'] = image_url
                 scene['videoUrl'] = None
             except Exception as e:
-                logging.error(f"Trabajo {job_id}: No se pudo generar imagen para la escena {scene['id']}: {e}", exc_info=True)
+                logging.error(f"Trabajo {job_id}: Fallo definitivo al generar imagen para la escena {scene['id']}: {e}", exc_info=True)
                 error_img_res = '1080x1920' if aspect_ratio == '9:16' else '1920x1080'
-                scene['imageUrl'] = f"https://via.placeholder.com/{error_img_res}?text=Error+al+generar+imagen"
+                scene['imageUrl'] = f"https://via.placeholder.com/{error_img_res}?text=Error+IA"
                 scene['videoUrl'] = None
             scenes_con_media.append(scene)
             
@@ -162,7 +199,9 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v2.5 - Estable y Corregido"
+    return "Backend de IA para Videos v2.7 - Generación de Imágenes por Keywords"
+
+# El resto de los endpoints no necesitan cambios, ya que la nueva lógica está encapsulada.
 
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
@@ -258,6 +297,7 @@ def regenerate_scene_part():
         try:
             logging.info(f"Regenerando media para escena: {scene.get('id')}")
             aspect_ratio = config.get('resolucion') or config.get('resolucionVideo', '16:9')
+            # La regeneración individual también usará la nueva lógica de keywords
             new_image_url = _generate_and_upload_image(scene.get('script', 'una imagen abstracta'), aspect_ratio)
             return jsonify({"newImageUrl": new_image_url, "newVideoUrl": None})
         except Exception as e:
@@ -342,4 +382,4 @@ def generate_voice_sample():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-    
+                
