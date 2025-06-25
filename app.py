@@ -4,6 +4,7 @@ import json
 import requests
 import logging
 import time
+import re # Importamos la librería de expresiones regulares para la limpieza
 import threading 
 from functools import wraps
 from flask import Flask, request, jsonify
@@ -97,23 +98,17 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-# --- INICIO DE LA NUEVA MECÁNICA ---
 @retry_on_failure()
 def _get_keywords_for_image_prompt(script_text):
     """Usa la IA de texto para extraer palabras clave seguras y visuales del guion."""
     prompt = f"""
     Analiza el siguiente texto de una escena de video. Extrae de 4 a 5 palabras clave (keywords) que mejor describan visualmente la escena.
-
     **Reglas Importantes:**
     1.  Las palabras clave deben ser seguras y neutrales, aptas para un generador de imágenes con filtros de seguridad estrictos.
     2.  Enfócate en objetos, ambientes y conceptos visuales (ej: 'nave espacial, desierto, noche, estrellas, misterio').
     3.  Evita nombres propios o acciones complejas que puedan confundir a la IA de imágenes.
     4.  Devuelve únicamente las palabras clave en español, separadas por comas. NADA MÁS.
-
-    **Texto de la Escena:**
-    ---
-    {script_text}
-    ---
+    **Texto de la Escena:** --- {script_text} ---
     """
     response = model_text.generate_content(prompt)
     keywords = response.text.strip().replace("`", "")
@@ -122,29 +117,20 @@ def _get_keywords_for_image_prompt(script_text):
 
 @retry_on_failure()
 def _generate_and_upload_image(scene_script, aspect_ratio):
-    # Paso 1: Usar la IA para obtener palabras clave seguras del guion.
     keywords = _get_keywords_for_image_prompt(scene_script)
-    
     logging.info(f"Generando imagen desde keywords: '{keywords}' con aspect ratio: {aspect_ratio}")
-    
-    # Paso 2: Construir un prompt de imagen limpio usando solo las palabras clave.
     image_prompt = f"cinematic, photorealistic, high detail image of: {keywords}"
-    
     images = model_image.generate_images(
         prompt=image_prompt,
         number_of_images=1,
         aspect_ratio=aspect_ratio,
         negative_prompt="text, watermark, logo, blurry, words, letters, signature"
     )
-    
     if not images:
         logging.warning(f"La API no devolvió imágenes para las keywords: '{keywords}'.")
         raise IndexError("La lista de imágenes generadas está vacía.")
-
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
-# --- FIN DE LA NUEVA MECÁNICA ---
-
 
 @retry_on_failure()
 def _generate_audio_with_api(ssml_script, voice_id):
@@ -163,12 +149,10 @@ def _generate_audio_with_api(ssml_script, voice_id):
 def _perform_image_generation(job_id, scenes, aspect_ratio):
     total_scenes = len(scenes)
     scenes_con_media = []
-    
     try:
         for i, scene in enumerate(scenes):
             JOBS[job_id]['status'] = 'processing'
             JOBS[job_id]['progress'] = f"{i + 1}/{total_scenes}"
-            
             logging.info(f"Trabajo {job_id}: Procesando imagen {i+1}/{total_scenes}")
             scene['id'] = scene.get('id', f'scene-{uuid.uuid4()}')
             try:
@@ -181,15 +165,12 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
                 scene['imageUrl'] = f"https://via.placeholder.com/{error_img_res}?text=Error+IA"
                 scene['videoUrl'] = None
             scenes_con_media.append(scene)
-            
             if i < total_scenes - 1:
                 logging.info(f"Trabajo {job_id}: Pausando por 10 segundos para respetar la cuota de la API.")
                 time.sleep(10)
-        
         JOBS[job_id]['status'] = 'completed'
         JOBS[job_id]['result'] = {"scenes": scenes_con_media}
         logging.info(f"Trabajo {job_id} completado exitosamente.")
-
     except Exception as e:
         logging.error(f"Trabajo {job_id} falló catastróficamente: {e}", exc_info=True)
         JOBS[job_id]['status'] = 'error'
@@ -199,30 +180,21 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v2.7 - Generación de Imágenes por Keywords"
-
-# El resto de los endpoints no necesitan cambios, ya que la nueva lógica está encapsulada.
+    return "Backend de IA para Videos v2.8 - Limpieza SSML Avanzada"
 
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
         data = request.get_json()
         logging.info(f"Recibida solicitud de trabajo para generar contenido con datos: {data}")
-        
         nicho = data.get('nicho', 'documentales')
-        
         instruccion_veracidad = ""
         if nicho != 'biblia': 
-            instruccion_veracidad = """
-            - **VERACIDAD Y HECHOS REALES (REGLA CRÍTICA):** El guion DEBE basarse estrictamente en hechos y datos verificables y reales sobre el tema solicitado.
-            """
-
+            instruccion_veracidad = "- **VERACIDAD Y HECHOS REALES (REGLA CRÍTICA):** El guion DEBE basarse estrictamente en hechos y datos verificables y reales sobre el tema solicitado."
         duracion_a_escenas = {"50": 4, "120": 6, "180": 8, "300": 10, "600": 15}
         numero_de_escenas = duracion_a_escenas.get(str(data.get('duracionVideo', '50')), 4)
-        
         prompt = f"""
         Eres un guionista experto y documentalista. Tu tarea es crear un guion completo.
-
         **Instrucciones de Guion:**
         - **Idioma (REGLA INDISPENSABLE):** El guion DEBE estar escrito íntegramente en **Español Latinoamericano**. Utiliza un lenguaje natural y claro para esa región.
         - **Tema Principal:** "{data.get('guionPersonalizado')}"
@@ -232,35 +204,23 @@ def generate_initial_content():
         {instruccion_veracidad}
         - **Formato Narrativo:** Párrafos completos, como si un narrador lo contara.
         - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas.
-
         **Formato de Salida Obligatorio:**
         La respuesta DEBE SER ÚNICAMENTE un objeto JSON válido con una clave "scenes", que es un array de objetos. Cada objeto debe tener "id" y "script".
         """
-
         logging.info("Enviando prompt de guion a Gemini.")
         response = model_text.generate_content(prompt)
         parsed_json = safe_json_parse(response.text)
-
         if not (parsed_json and 'scenes' in parsed_json):
             logging.error(f"La IA no pudo generar un guion con el formato correcto. Respuesta: {response.text}")
             return jsonify({"error": "La IA no pudo generar un guion con el formato correcto. Intenta de nuevo."}), 500
-
         scenes = parsed_json['scenes']
         logging.info(f"Guion generado con {len(scenes)} escenas. Creando trabajo de generación de imágenes.")
-        
         aspect_ratio = data.get('resolucionVideo') or data.get('resolucion', '16:9')
-
         job_id = str(uuid.uuid4())
         JOBS[job_id] = {'status': 'pending', 'progress': f'0/{len(scenes)}'}
-        
-        thread = threading.Thread(
-            target=_perform_image_generation,
-            args=(job_id, scenes, aspect_ratio)
-        )
+        thread = threading.Thread(target=_perform_image_generation, args=(job_id, scenes, aspect_ratio))
         thread.start()
-        
         return jsonify({"jobId": job_id})
-            
     except Exception as e:
         logging.error("Error inesperado en generate_initial_content.", exc_info=True)
         return jsonify({"error": f"Ocurrió un error interno al iniciar el trabajo: {e}"}), 500
@@ -278,34 +238,27 @@ def regenerate_scene_part():
     scene = data.get('scene')
     part_to_regenerate = data.get('part')
     config = data.get('config')
-
     if not all([scene, part_to_regenerate, config]):
         return jsonify({"error": "Faltan datos de escena, parte a regenerar o configuración"}), 400
-
     if part_to_regenerate == 'script':
         try:
-            logging.info(f"Regenerando guion para escena: {scene.get('id')}")
             prompt = f"Eres un guionista experto. Reescribe el siguiente guion para una escena de video de forma creativa y concisa. **El nuevo guion debe estar en Español Latinoamericano.** Mantén la idea central: '{scene.get('script')}'. Devuelve solo el nuevo texto del guion, sin comillas ni explicaciones."
             response = model_text.generate_content(prompt)
-            new_script = response.text.strip()
-            return jsonify({"newScript": new_script})
+            return jsonify({"newScript": response.text.strip()})
         except Exception as e:
             logging.error(f"Error al regenerar guion: {e}", exc_info=True)
             return jsonify({"error": "Error al contactar al modelo de IA para regenerar el guion."}), 500
-
     elif part_to_regenerate == 'media':
         try:
-            logging.info(f"Regenerando media para escena: {scene.get('id')}")
             aspect_ratio = config.get('resolucion') or config.get('resolucionVideo', '16:9')
-            # La regeneración individual también usará la nueva lógica de keywords
             new_image_url = _generate_and_upload_image(scene.get('script', 'una imagen abstracta'), aspect_ratio)
             return jsonify({"newImageUrl": new_image_url, "newVideoUrl": None})
         except Exception as e:
             logging.error(f"Error al regenerar media: {e}", exc_info=True)
             return jsonify({"error": f"Error al generar la nueva imagen con IA: {str(e)}"}), 500
-            
     return jsonify({"error": "Parte no válida para regenerar. Debe ser 'script' o 'media'."}), 400
 
+# --- INICIO DE LA SOLUCIÓN: Limpieza de Audio ---
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
     data = request.get_json()
@@ -331,19 +284,35 @@ def generate_full_audio():
         Eres un director de voz experto. Tu misión es tomar un guion y convertirlo en SSML.
         **Instrucción de Narración (Regla Maestra):** {instruccion_narracion}
         **Guion de Texto Plano a Convertir:** --- {plain_text_script} ---
-        **Requisitos Técnicos:** Usa etiquetas SSML. El resultado debe estar envuelto en `<speak>...</speak>`. Devuelve ÚNICAMENTE la cadena SSML.
+        **Requisitos Técnicos:** Usa etiquetas SSML. El resultado debe estar envuelto en `<speak>...</speak>`. Devuelve ÚNICAMENTE la cadena SSML. No incluyas `<?xml...?>` ni ` ``` `
         """
         
         response_ssml = model_text.generate_content(ssml_prompt)
-        ssml_script = response_ssml.text.strip().replace("```ssml", "").replace("```", "")
-        if not ssml_script.startswith('<speak>') or not ssml_script.endswith('</speak>'):
-            ssml_script = f"<speak>{ssml_script}</speak>"
+        raw_ssml = response_ssml.text
+
+        logging.info(f"Respuesta cruda de SSML de la IA: {raw_ssml[:200]}") # Log para depuración
+
+        # Limpieza robusta de SSML: extrae solo el contenido dentro de <speak>
+        match = re.search(r'<speak>(.*)</speak>', raw_ssml, re.DOTALL | re.IGNORECASE)
+        if match:
+            inner_content = match.group(1).strip()
+            ssml_script = f"<speak>{inner_content}</speak>"
+            logging.info("SSML extraído y limpiado exitosamente.")
+        else:
+            # Si no encuentra <speak>, asume que toda la respuesta es el guion
+            # y lo envuelve manualmente, eliminando cualquier posible basura.
+            logging.warning("No se encontraron etiquetas <speak>. Envolviendo texto crudo.")
+            cleaned_text = raw_ssml.replace("```ssml", "").replace("```", "").strip()
+            ssml_script = f"<speak>{cleaned_text}</speak>"
+
         public_url = _generate_audio_with_api(ssml_script, voice_id)
         return jsonify({"audioUrl": public_url})
 
     except Exception as e:
         logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
         return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
+# --- FIN DE LA SOLUCIÓN ---
+
 
 @app.route('/api/generate-seo', methods=['POST'])
 def generate_seo():
@@ -382,4 +351,4 @@ def generate_voice_sample():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-                
+            
