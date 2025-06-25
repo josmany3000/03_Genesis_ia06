@@ -37,11 +37,7 @@ if os.getenv('GOOGLE_APPLICATION_CREDENTIALS_JSON'):
 app = Flask(__name__)
 CORS(app)
 
-# --- INICIO DEL CAMBIO: Sistema de Trabajos en Memoria ---
-# Un diccionario simple para almacenar el estado de los trabajos de generación de contenido.
-# En una aplicación de producción más grande, esto podría ser reemplazado por una base de datos como Redis.
 JOBS = {}
-# --- FIN DEL CAMBIO ---
 
 # --- Configuración de Clientes de Google ---
 try:
@@ -59,7 +55,7 @@ model_image = ImageGenerationModel.from_pretrained("imagegeneration@006")
 
 
 # --- 2. DECORADOR DE REINTENTOS ---
-def retry_on_failure(retries=3, delay=2, backoff=2):
+def retry_on_failure(retries=3, delay=5, backoff=2): # Aumentamos el delay inicial a 5 segundos
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -78,10 +74,8 @@ def retry_on_failure(retries=3, delay=2, backoff=2):
     return decorator
 
 # --- 3. FUNCIONES AUXILIARES ---
-
-@retry_on_failure(retries=3, delay=2)
+@retry_on_failure
 def upload_to_gcs(file_stream, destination_blob_name, content_type):
-    # ... (sin cambios en esta función)
     logging.info(f"Iniciando subida a GCS. Bucket: {GCS_BUCKET_NAME}, Destino: {destination_blob_name}")
     if not GCS_BUCKET_NAME:
         raise ValueError("El nombre del bucket de GCS no está configurado.")
@@ -93,7 +87,6 @@ def upload_to_gcs(file_stream, destination_blob_name, content_type):
     return blob.public_url
 
 def safe_json_parse(text):
-    # ... (sin cambios en esta función)
     text = text.strip().replace('```json', '').replace('```', '')
     try:
         return json.loads(text)
@@ -101,9 +94,8 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-@retry_on_failure(retries=3, delay=2)
+@retry_on_failure
 def _generate_and_upload_image(scene_script, aspect_ratio):
-    # ... (sin cambios en esta función)
     logging.info(f"Generando imagen para el guion: '{scene_script[:50]}...' con aspect ratio: {aspect_ratio}")
     image_prompt = f"cinematic, photorealistic, high detail image for a video scene about: {scene_script}"
     
@@ -117,9 +109,8 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
 
-@retry_on_failure(retries=3, delay=2)
+@retry_on_failure
 def _generate_audio_with_api(ssml_script, voice_id):
-    # ... (sin cambios en esta función)
     logging.info(f"Llamando a la API de Google TTS con SSML y voz '{voice_id}'.")
     synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
     language_code = '-'.join(voice_id.split('-', 2)[:2])
@@ -134,16 +125,11 @@ def _generate_audio_with_api(ssml_script, voice_id):
 # --- 4. TRABAJADOR DE FONDO PARA GENERACIÓN DE IMÁGENES ---
 
 def _perform_image_generation(job_id, scenes, aspect_ratio):
-    """
-    Esta función se ejecuta en un hilo separado para no bloquear la respuesta principal.
-    Genera una imagen para cada escena y actualiza el estado del trabajo.
-    """
     total_scenes = len(scenes)
     scenes_con_media = []
     
     try:
         for i, scene in enumerate(scenes):
-            # Actualiza el progreso del trabajo
             JOBS[job_id]['status'] = 'processing'
             JOBS[job_id]['progress'] = f"{i + 1}/{total_scenes}"
             
@@ -159,8 +145,15 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
                 scene['imageUrl'] = f"https://via.placeholder.com/{error_img_res}?text=Error+al+generar+imagen"
                 scene['videoUrl'] = None
             scenes_con_media.append(scene)
+            
+            # --- INICIO DE LA SOLUCIÓN DE "PACIENCIA" ---
+            # Pausa de 10 segundos entre cada imagen para respetar la cuota de la API.
+            # Esto evita el error "429 Quota Exceeded".
+            if i < total_scenes - 1: # No esperar después de la última imagen
+                logging.info(f"Trabajo {job_id}: Pausando por 10 segundos para respetar la cuota de la API.")
+                time.sleep(10)
+            # --- FIN DE LA SOLUCIÓN ---
         
-        # Una vez completado, actualiza el trabajo con el resultado final
         JOBS[job_id]['status'] = 'completed'
         JOBS[job_id]['result'] = {"scenes": scenes_con_media}
         logging.info(f"Trabajo {job_id} completado exitosamente.")
@@ -172,15 +165,10 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 
 
 # --- 5. ENDPOINTS DE LA API ---
-
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v2.3 - Generación Asíncrona y en Español"
+    return "Backend de IA para Videos v2.4 - Manejo de Cuotas y en Español"
 
-
-# =================================================================================
-# ### Endpoint de generación de contenido (AHORA ASÍNCRONO) ###
-# =================================================================================
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
@@ -228,27 +216,21 @@ def generate_initial_content():
         
         aspect_ratio = data.get('resolucionVideo') or data.get('resolucion', '16:9')
 
-        # --- LÓGICA ASÍNCRONA ---
         job_id = str(uuid.uuid4())
         JOBS[job_id] = {'status': 'pending', 'progress': f'0/{len(scenes)}'}
         
-        # Iniciar la generación de imágenes en un hilo de fondo
         thread = threading.Thread(
             target=_perform_image_generation,
             args=(job_id, scenes, aspect_ratio)
         )
         thread.start()
         
-        # Devolver el ID del trabajo inmediatamente
         return jsonify({"jobId": job_id})
             
     except Exception as e:
         logging.error("Error inesperado en generate_initial_content.", exc_info=True)
         return jsonify({"error": f"Ocurrió un error interno al iniciar el trabajo: {e}"}), 500
 
-# =================================================================================
-# ### NUEVO Endpoint para consultar estado de generación de contenido ###
-# =================================================================================
 @app.route('/api/content-job-status/<job_id>', methods=['GET'])
 def get_content_job_status(job_id):
     job = JOBS.get(job_id)
@@ -256,9 +238,6 @@ def get_content_job_status(job_id):
         return jsonify({"error": "Trabajo no encontrado"}), 404
     return jsonify(job)
 
-# =================================================================================
-# ### Endpoint de regeneración con regla de idioma ###
-# =================================================================================
 @app.route('/api/regenerate-scene-part', methods=['POST'])
 def regenerate_scene_part():
     data = request.get_json()
@@ -282,7 +261,6 @@ def regenerate_scene_part():
 
     elif part_to_regenerate == 'media':
         try:
-            # La regeneración de una sola imagen es rápida, por lo que puede seguir siendo síncrona.
             logging.info(f"Regenerando media para escena: {scene.get('id')}")
             aspect_ratio = config.get('resolucion') or config.get('resolucionVideo', '16:9')
             new_image_url = _generate_and_upload_image(scene.get('script', 'una imagen abstracta'), aspect_ratio)
@@ -293,12 +271,8 @@ def regenerate_scene_part():
             
     return jsonify({"error": "Parte no válida para regenerar. Debe ser 'script' o 'media'."}), 400
 
-# =================================================================================
-# ### Endpoint de audio con LÓGICA DE PROMPTS DE NARRACIÓN (sin cambios) ###
-# =================================================================================
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
-    # ... (esta función no necesita cambios, ya que el guion ya viene en español)
     data = request.get_json()
     plain_text_script = data.get('script')
     voice_id = data.get('voice', 'es-US-Neural2-A')
@@ -336,9 +310,6 @@ def generate_full_audio():
         logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
         return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
 
-# =================================================================================
-# ### Endpoint de SEO con regla de idioma ###
-# =================================================================================
 @app.route('/api/generate-seo', methods=['POST'])
 def generate_seo():
     try:
@@ -359,10 +330,8 @@ def generate_seo():
         logging.error("Error al generar SEO: %s", e)
         return jsonify({"error": "Ocurrió un error interno al generar el contenido SEO."}), 500
 
-# Endpoint de muestra de voz sin cambios
 @app.route('/api/voice-sample', methods=['POST'])
 def generate_voice_sample():
-    # ... (sin cambios)
     data = request.get_json()
     voice_id = data.get('voice')
     if not voice_id: return jsonify({"error": "Se requiere un ID de voz"}), 400
@@ -374,9 +343,8 @@ def generate_voice_sample():
         logging.error("Error al generar muestra de voz: %s", e)
         return jsonify({"error": f"No se pudo generar la muestra de voz: {str(e)}"}), 500
 
-
 # --- 6. EJECUCIÓN DEL SERVIDOR ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-                
+    
