@@ -215,7 +215,7 @@ def generate_initial_content():
         - **Nicho:** "{nicho}"
         - **Estilo de Escritura Deseado:** Escribe el guion con {instruccion_estilo}
         - **Estructura:** Genera EXACTAMENTE {numero_de_escenas} escenas.
-        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Implementar lo necesario.
+        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Sé muy conciso.
         {instruccion_veracidad}
         - **Formato Narrativo:** Párrafos completos, como si lo contara un narrador de documentales. NO incluyas encabezados de formato de guion de cine (como EXT. DIA, INT. NOCHE, etc.).
         - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas de ningún tipo.
