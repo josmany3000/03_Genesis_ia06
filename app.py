@@ -1,4 +1,3 @@
-# ppy
 import os
 import uuid
 import json
@@ -133,6 +132,7 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
 
+# ✅ FUNCIÓN DE AUDIO SIMPLIFICADA: Solo convierte SSML simple a audio.
 @retry_on_failure()
 def _generate_audio_with_api(ssml_script, voice_id):
     logging.info(f"Llamando a la API de Google TTS con SSML simple y voz '{voice_id}'.")
@@ -181,8 +181,9 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v4.1 - Corrección de Bugs"
+    return "Backend de IA para Videos v4.0 - Simplificado y Robusto"
 
+# ✅ ENDPOINT ACTUALIZADO: Respeta duración y estilo de escritura
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
@@ -196,9 +197,11 @@ def generate_initial_content():
         duracion_a_escenas = {"50": 4, "120": 6, "180": 8, "300": 10, "600": 15}
         numero_de_escenas = duracion_a_escenas.get(str(data.get('duracionVideo', '50')), 4)
         
-        palabras_totales = int(data.get('duracionVideo', 50)) * 2.5
+        # Calculamos palabras por escena para respetar la duración
+        palabras_totales = int(data.get('duracionVideo', 50)) * 2.5 # Aprox. 2.5 palabras/segundo
         palabras_por_escena = int(palabras_totales // numero_de_escenas)
 
+        # Mapeamos el ritmo de narración a un estilo de escritura
         ritmo = data.get('ritmoNarracion', 'narrador')
         estilos_escritura = {
             "epico": "un estilo de escritura épico, con frases impactantes y grandilocuentes.",
@@ -217,7 +220,7 @@ def generate_initial_content():
         - **Estructura:** Genera EXACTAMENTE {numero_de_escenas} escenas.
         - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Sé muy conciso.
         {instruccion_veracidad}
-        - **Formato Narrativo:** Párrafos completos, como si lo contara un narrador de documentales. NO incluyas encabezados de formato de guion de cine (como EXT. DIA, INT. NOCHE, etc.).
+        - **Formato Narrativo:** Párrafos completos, como si un narrador lo contara.
         - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas de ningún tipo.
         **Formato de Salida Obligatorio:**
         La respuesta DEBE SER ÚNICAMENTE un objeto JSON válido con una clave "scenes", que es un array de objetos. Cada objeto debe tener "id" y "script".
@@ -257,27 +260,12 @@ def regenerate_scene_part():
         return jsonify({"error": "Faltan datos de escena, parte a regenerar o configuración"}), 400
     if part_to_regenerate == 'script':
         try:
-            # ✅ PROMPT CORREGIDO: Se le ordena a la IA no usar formato de guion de cine.
-            prompt = f"""
-            Eres un guionista experto. Reescribe el siguiente guion para una escena de video de forma creativa y concisa.
-            **Reglas CRÍTICAS:**
-            1.  **Formato de Salida:** Devuelve ÚNICAMENTE el texto del párrafo narrativo.
-            2.  **NO USES FORMATO DE GUION DE CINE:** No incluyas encabezados como 'EXT. DIA', 'INT. NOCHE', nombres de personajes en mayúsculas o cualquier otra etiqueta de formato profesional.
-            3.  **Idioma:** El nuevo guion debe estar en **Español Latinoamericano**.
-            
-            **Idea Central a Mantener:**
-            ---
-            {scene.get('script')}
-            ---
-            """
+            prompt = f"Eres un guionista experto. Reescribe el siguiente guion para una escena de video de forma creativa y concisa. **El nuevo guion debe estar en Español Latinoamericano.** Mantén la idea central: '{scene.get('script')}'. Devuelve solo el nuevo texto del guion, sin comillas ni explicaciones."
             response = model_text.generate_content(prompt)
-            # Limpieza adicional por si la IA aún así añade el encabezado
-            cleaned_script = re.sub(r'^(EXT\.|INT\.)\s*.*?\n', '', response.text.strip(), flags=re.IGNORECASE)
-            return jsonify({"newScript": cleaned_script})
+            return jsonify({"newScript": response.text.strip()})
         except Exception as e:
             logging.error(f"Error al regenerar guion: {e}", exc_info=True)
             return jsonify({"error": "Error al contactar al modelo de IA para regenerar el guion."}), 500
-            
     elif part_to_regenerate == 'media':
         try:
             aspect_ratio = config.get('resolucion') or config.get('resolucionVideo', '16:9')
@@ -288,6 +276,7 @@ def regenerate_scene_part():
             return jsonify({"error": f"Error al generar la nueva imagen con IA: {str(e)}"}), 500
     return jsonify({"error": "Parte no válida para regenerar. Debe ser 'script' o 'media'."}), 400
 
+# ✅ ENDPOINT ACTUALIZADO: Lógica de audio simplificada, sin SSML complejo.
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
     data = request.get_json()
@@ -299,9 +288,16 @@ def generate_full_audio():
     
     try:
         logging.info(f"Generando audio desde texto plano para la voz: {voice_id}")
+        
+        # Ya no se le pide a la IA que cree SSML.
+        # Simplemente envolvemos el texto plano en las etiquetas <speak> para la API de TTS.
+        # Esto es robusto y evita cualquier error de ritmo o formato.
         ssml_script = f"<speak>{plain_text_script}</speak>"
+        
+        # Llamamos a la API de TTS con el texto limpio y envuelto.
         public_url = _generate_audio_with_api(ssml_script, voice_id)
         return jsonify({"audioUrl": public_url})
+
     except Exception as e:
         logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
         return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
@@ -343,4 +339,4 @@ def generate_voice_sample():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-
+    
