@@ -15,7 +15,7 @@ from google.cloud import texttospeech
 from google.cloud import storage
 import vertexai
 from vertexai.preview.vision_models import ImageGenerationModel
-from xml.sax.saxutils import escape # CORRECCIÓN: Importado para limpiar texto para SSML en la función de audio.
+# ÚNICO CAMBIO: Se elimina la importación 'escape' ya que no se usará SSML.
 
 # --- 1. CONFIGURACIÓN INICIAL Y LOGGING ---
 load_dotenv()
@@ -99,7 +99,6 @@ def safe_json_parse(text):
         logging.error(f"Error al decodificar JSON. Texto problemático: {text[:500]}", exc_info=True)
         return None
 
-# CORRECCIÓN: Prompt de keywords ultra-defensivo para evitar filtros de seguridad.
 @retry_on_failure()
 def _get_keywords_for_image_prompt(script_text):
     """Usa la IA de texto para extraer palabras clave 100% seguras y visuales del guion."""
@@ -121,7 +120,6 @@ def _get_keywords_for_image_prompt(script_text):
     logging.info(f"Keywords de seguridad generadas para el guion: '{keywords}'")
     return keywords
 
-# CORRECCIÓN: Manejo de error si la API de imágenes devuelve una lista vacía.
 @retry_on_failure()
 def _generate_and_upload_image(scene_script, aspect_ratio):
     keywords = _get_keywords_for_image_prompt(scene_script)
@@ -137,7 +135,7 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
         )
         if not images:
             logging.warning(f"La API no devolvió imágenes para las keywords: '{keywords}'. La solicitud pudo ser bloqueada. Retornando None.")
-            return None # Retorna None si la lista está vacía.
+            return None 
         
         public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
         return public_gcs_url
@@ -145,11 +143,12 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
         logging.error(f"Excepción durante la llamada a generate_images para '{keywords}': {e}", exc_info=True)
         return None
 
-
+# ÚNICO CAMBIO: La función ahora acepta texto plano ('text_input') en lugar de SSML.
 @retry_on_failure()
-def _generate_audio_with_api(ssml_script, voice_id):
-    logging.info(f"Llamando a la API de Google TTS con voz '{voice_id}'.")
-    synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
+def _generate_audio_with_api(text_input, voice_id):
+    logging.info(f"Llamando a la API de Google TTS con TEXTO PLANO y voz '{voice_id}'.")
+    # ÚNICO CAMBIO: Se usa texttospeech.SynthesisInput(text=...) en lugar de (ssml=...).
+    synthesis_input = texttospeech.SynthesisInput(text=text_input)
     language_code = '-'.join(voice_id.split('-', 2)[:2])
     voice = texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_id)
     audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
@@ -160,7 +159,6 @@ def _generate_audio_with_api(ssml_script, voice_id):
 
 
 # --- 4. TRABAJADOR DE FONDO PARA GENERACIÓN DE IMÁGENES ---
-# CORRECCIÓN: La lógica ahora maneja correctamente un retorno 'None' de la generación de imagen.
 def _perform_image_generation(job_id, scenes, aspect_ratio):
     total_scenes = len(scenes)
     scenes_con_media = []
@@ -176,7 +174,6 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
             if image_url:
                 scene['imageUrl'] = image_url
             else:
-                # Si la generación falla (retorna None), se usa un placeholder.
                 logging.error(f"Trabajo {job_id}: Fallo definitivo al generar imagen para la escena {scene['id']}. Se usará un placeholder.")
                 error_img_res = '1080x1920' if aspect_ratio == '9:16' else '1920x1080'
                 scene['imageUrl'] = f"https://via.placeholder.com/{error_img_res}?text=Error+Al+Generar"
@@ -200,9 +197,8 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v5.0 - Estable"
+    return "Backend de IA para Videos v5.1 - Solo Texto Plano para Audio"
 
-# CORRECCIÓN: Prompt principal con rol neutral a la duración y reglas estrictas de formato.
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
@@ -269,7 +265,6 @@ def get_content_job_status(job_id):
         return jsonify({"error": "Trabajo no encontrado"}), 404
     return jsonify(job)
 
-# CORRECCIÓN: Prompt de regeneración de guion reforzado para evitar 'EXT. DÍA' y otros formatos indeseados.
 @app.route('/api/regenerate-scene-part', methods=['POST'])
 def regenerate_scene_part():
     data = request.get_json()
@@ -308,7 +303,7 @@ def regenerate_scene_part():
             return jsonify({"error": f"Error al generar la nueva imagen: {str(e)}"}), 500
     return jsonify({"error": "Parte no válida para regenerar."}), 400
 
-# CORRECCIÓN: Se limpia el texto antes de enviarlo a la API de TTS para evitar errores con caracteres especiales.
+# ÚNICO CAMBIO: Se elimina el uso de <speak> y la limpieza SSML. Se pasa el texto plano directamente.
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
     data = request.get_json()
@@ -321,11 +316,9 @@ def generate_full_audio():
     try:
         logging.info(f"Generando audio desde texto plano para la voz: {voice_id}")
         
-        # Limpia el texto de caracteres que pueden romper el SSML.
-        safe_text = escape(plain_text_script)
-        ssml_script = f"<speak>{safe_text}</speak>"
+        # ÚNICO CAMBIO: Se pasa el texto plano directamente a la función de la API.
+        public_url = _generate_audio_with_api(plain_text_script, voice_id)
         
-        public_url = _generate_audio_with_api(ssml_script, voice_id)
         return jsonify({"audioUrl": public_url})
 
     except Exception as e:
@@ -352,14 +345,16 @@ def generate_seo():
         logging.error("Error al generar SEO: %s", e)
         return jsonify({"error": "Ocurrió un error interno al generar el contenido SEO."}), 500
 
+# ÚNICO CAMBIO: La muestra de voz ahora usa texto plano, sin SSML.
 @app.route('/api/voice-sample', methods=['POST'])
 def generate_voice_sample():
     data = request.get_json()
     voice_id = data.get('voice')
     if not voice_id: return jsonify({"error": "Se requiere un ID de voz"}), 400
     try:
-        sample_ssml = "<speak>Hola, esta es una prueba de la voz seleccionada para la narración.</speak>"
-        public_url = _generate_audio_with_api(sample_ssml, voice_id)
+        # ÚNICO CAMBIO: Se define como texto plano.
+        sample_text = "Hola, esta es una prueba de la voz seleccionada para la narración."
+        public_url = _generate_audio_with_api(sample_text, voice_id)
         return jsonify({"audioUrl": public_url})
     except Exception as e:
         logging.error("Error al generar muestra de voz: %s", e)
@@ -369,4 +364,4 @@ def generate_voice_sample():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-    
+            
