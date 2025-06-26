@@ -211,14 +211,14 @@ def generate_initial_content():
         instruccion_estilo = estilos_escritura.get(ritmo, "un estilo de escritura de narrador neutro y profesional.")
 
         prompt = f"""
-        Eres un guionista experto y documentalista. Tu tarea es crear un guion completo.
+        Tu tarea es crear un guion completo basado en hechos reales y documentados.
         **Instrucciones de Guion:**
         - **Idioma (REGLA INDISPENSABLE):** El guion DEBE estar escrito íntegramente en **Español Latinoamericano**.
         - **Tema Principal:** "{data.get('guionPersonalizado')}"
         - **Nicho:** "{nicho}"
         - **Estilo de Escritura Deseado:** Escribe el guion con {instruccion_estilo}
         - **Estructura:** Genera EXACTAMENTE {numero_de_escenas} escenas.
-        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Sé muy conciso.
+        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Impleneta lo necesario pero sin rebasar la durscion del video.
         {instruccion_veracidad}
         - **Formato Narrativo:** Párrafos completos, como si un narrador lo contara.
         - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas de ningún tipo.
