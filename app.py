@@ -1,4 +1,3 @@
-# Importaciones necesarias al principio de tu archivo
 import os
 import uuid
 import json
@@ -16,11 +15,8 @@ from google.cloud import texttospeech
 from google.cloud import storage
 import vertexai
 from vertexai.preview.vision_models import ImageGenerationModel
-# ¡NUEVA IMPORTACIÓN PARA LA SOLUCIÓN DE AUDIO!
-from pydub import AudioSegment
-import io
 
-# --- 1. CONFIGURACIÓN INICIAL Y LOGGING (Sin cambios) ---
+# --- 1. CONFIGURACIÓN INICIAL Y LOGGING ---
 load_dotenv()
 
 logging.basicConfig(
@@ -44,7 +40,7 @@ CORS(app)
 
 JOBS = {}
 
-# --- Configuración de Clientes de Google (Sin cambios) ---
+# --- Configuración de Clientes de Google ---
 try:
     genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
     text_to_speech_client = texttospeech.TextToSpeechClient()
@@ -59,7 +55,7 @@ model_text = genai.GenerativeModel('gemini-1.5-flash')
 model_image = ImageGenerationModel.from_pretrained("imagegeneration@006")
 
 
-# --- 2. DECORADOR DE REINTENTOS (Sin cambios) ---
+# --- 2. DECORADOR DE REINTENTOS ---
 def retry_on_failure(retries=3, delay=5, backoff=2):
     def decorator(func):
         @wraps(func)
@@ -81,7 +77,7 @@ def retry_on_failure(retries=3, delay=5, backoff=2):
         return wrapper
     return decorator
 
-# --- 3. FUNCIONES AUXILIARES (Sin cambios) ---
+# --- 3. FUNCIONES AUXILIARES ---
 @retry_on_failure()
 def upload_to_gcs(file_stream, destination_blob_name, content_type):
     logging.info(f"Iniciando subida a GCS. Bucket: {GCS_BUCKET_NAME}, Destino: {destination_blob_name}")
@@ -104,6 +100,7 @@ def safe_json_parse(text):
 
 @retry_on_failure()
 def _get_keywords_for_image_prompt(script_text):
+    """Usa la IA de texto para extraer palabras clave seguras y visuales del guion."""
     prompt = f"""
     Analiza el siguiente texto de una escena de video. Extrae de 4 a 5 palabras clave (keywords) que mejor describan visualmente la escena.
     **Reglas Importantes:**
@@ -135,6 +132,19 @@ def _generate_and_upload_image(scene_script, aspect_ratio):
     public_gcs_url = upload_to_gcs(images[0]._image_bytes, f"images/img_{uuid.uuid4()}.png", 'image/png')
     return public_gcs_url
 
+# ✅ FUNCIÓN DE AUDIO SIMPLIFICADA: Solo convierte SSML simple a audio.
+@retry_on_failure()
+def _generate_audio_with_api(ssml_script, voice_id):
+    logging.info(f"Llamando a la API de Google TTS con SSML simple y voz '{voice_id}'.")
+    synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
+    language_code = '-'.join(voice_id.split('-', 2)[:2])
+    voice = texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_id)
+    audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
+    response = text_to_speech_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+    logging.info("Respuesta de la API de TTS recibida.")
+    public_url = upload_to_gcs(response.audio_content, f"audio/audio_{uuid.uuid4()}.mp3", 'audio/mpeg')
+    return public_url
+
 
 # --- 4. TRABAJADOR DE FONDO PARA GENERACIÓN DE IMÁGENES ---
 def _perform_image_generation(job_id, scenes, aspect_ratio):
@@ -157,9 +167,8 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
                 scene['videoUrl'] = None
             scenes_con_media.append(scene)
             if i < total_scenes - 1:
-                # ✅ RECOMENDACIÓN APLICADA: Reducido el tiempo de espera
-                logging.info(f"Trabajo {job_id}: Pausando por 5 segundos para respetar la cuota de la API.")
-                time.sleep(5)
+                logging.info(f"Trabajo {job_id}: Pausando por 10 segundos para respetar la cuota de la API.")
+                time.sleep(10)
         JOBS[job_id]['status'] = 'completed'
         JOBS[job_id]['result'] = {"scenes": scenes_con_media}
         logging.info(f"Trabajo {job_id} completado exitosamente.")
@@ -172,8 +181,9 @@ def _perform_image_generation(job_id, scenes, aspect_ratio):
 # --- 5. ENDPOINTS DE LA API ---
 @app.route("/")
 def index():
-    return "Backend de IA para Videos v3.0 - Híbrido y Robusto"
+    return "Backend de IA para Videos v4.0 - Simplificado y Robusto"
 
+# ✅ ENDPOINT ACTUALIZADO: Respeta duración y estilo de escritura
 @app.route('/api/generate-initial-content', methods=['POST'])
 def generate_initial_content():
     try:
@@ -187,49 +197,41 @@ def generate_initial_content():
         duracion_a_escenas = {"50": 4, "120": 6, "180": 8, "300": 10, "600": 15}
         numero_de_escenas = duracion_a_escenas.get(str(data.get('duracionVideo', '50')), 4)
         
-        # ✅ SOLUCIÓN PROBLEMA 2 (TU PROPUESTA): Controlar la longitud del guion por escena
-        palabras_totales = int(data.get('duracionVideo', 50)) * 2.5 # Aprox. 2.5 palabras por segundo para un ritmo normal
+        # Calculamos palabras por escena para respetar la duración
+        palabras_totales = int(data.get('duracionVideo', 50)) * 2.5 # Aprox. 2.5 palabras/segundo
         palabras_por_escena = int(palabras_totales // numero_de_escenas)
-        
+
+        # Mapeamos el ritmo de narración a un estilo de escritura
+        ritmo = data.get('ritmoNarracion', 'narrador')
+        estilos_escritura = {
+            "epico": "un estilo de escritura épico, con frases impactantes y grandilocuentes.",
+            "historico": "un estilo de escritura de documental histórico, formal, claro y educativo.",
+            "locutor_radio": "un estilo de escritura de locutor de radio, amigable, directo y conversacional."
+        }
+        instruccion_estilo = estilos_escritura.get(ritmo, "un estilo de escritura de narrador neutro y profesional.")
+
         prompt = f"""
         Eres un guionista experto y documentalista. Tu tarea es crear un guion completo.
         **Instrucciones de Guion:**
         - **Idioma (REGLA INDISPENSABLE):** El guion DEBE estar escrito íntegramente en **Español Latinoamericano**.
         - **Tema Principal:** "{data.get('guionPersonalizado')}"
         - **Nicho:** "{nicho}"
-        - **Estilo de Narración Deseado:** "{data.get('ritmoNarracion')}"
+        - **Estilo de Escritura Deseado:** Escribe el guion con {instruccion_estilo}
         - **Estructura:** Genera EXACTAMENTE {numero_de_escenas} escenas.
+        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo de **{palabras_por_escena} palabras**. Sé muy conciso.
         {instruccion_veracidad}
-        - **REGLA DE LONGITUD CRÍTICA:** Cada escena debe tener un máximo estricto de **{palabras_por_escena} palabras**. Sé conciso.
         - **Formato Narrativo:** Párrafos completos, como si un narrador lo contara.
-        - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas.
+        - **Texto Limpio:** ÚNICAMENTE texto plano, sin etiquetas de ningún tipo.
         **Formato de Salida Obligatorio:**
         La respuesta DEBE SER ÚNICAMENTE un objeto JSON válido con una clave "scenes", que es un array de objetos. Cada objeto debe tener "id" y "script".
         """
-        logging.info(f"Enviando prompt de guion a Gemini con límite de {palabras_por_escena} palabras/escena.")
+        logging.info(f"Enviando prompt a Gemini con límite de {palabras_por_escena} palabras y estilo '{ritmo}'.")
         response = model_text.generate_content(prompt)
         parsed_json = safe_json_parse(response.text)
-        
         if not (parsed_json and 'scenes' in parsed_json):
             logging.error(f"La IA no pudo generar un guion con el formato correcto. Respuesta: {response.text}")
             return jsonify({"error": "La IA no pudo generar un guion con el formato correcto. Intenta de nuevo."}), 500
-        
         scenes = parsed_json['scenes']
-
-        # ✅ RECOMENDACIÓN APLICADA: Validar y registrar longitud de escenas
-        scenes_validadas = [s for s in scenes if s.get('script') and len(s['script'].split()) >= 5]
-        if len(scenes_validadas) < len(scenes):
-            logging.warning(f"Se filtraron {len(scenes) - len(scenes_validadas)} escenas por ser demasiado cortas o estar vacías.")
-        
-        if not scenes_validadas:
-            return jsonify({"error": "La IA no generó escenas con contenido válido."}), 500
-            
-        scenes = scenes_validadas
-        
-        for i, scene in enumerate(scenes):
-            word_count = len(scene['script'].split())
-            logging.info(f"Escena {i+1} generada con {word_count} palabras (límite: {palabras_por_escena}).")
-
         logging.info(f"Guion generado con {len(scenes)} escenas. Creando trabajo de generación de imágenes.")
         aspect_ratio = data.get('resolucionVideo') or data.get('resolucion', '16:9')
         job_id = str(uuid.uuid4())
@@ -243,7 +245,6 @@ def generate_initial_content():
 
 @app.route('/api/content-job-status/<job_id>', methods=['GET'])
 def get_content_job_status(job_id):
-    # (Sin cambios)
     job = JOBS.get(job_id)
     if not job:
         return jsonify({"error": "Trabajo no encontrado"}), 404
@@ -251,7 +252,6 @@ def get_content_job_status(job_id):
 
 @app.route('/api/regenerate-scene-part', methods=['POST'])
 def regenerate_scene_part():
-    # (Sin cambios)
     data = request.get_json()
     scene = data.get('scene')
     part_to_regenerate = data.get('part')
@@ -276,78 +276,34 @@ def regenerate_scene_part():
             return jsonify({"error": f"Error al generar la nueva imagen con IA: {str(e)}"}), 500
     return jsonify({"error": "Parte no válida para regenerar. Debe ser 'script' o 'media'."}), 400
 
-# ✅ SOLUCIÓN PROBLEMA 1 (REESTRUCTURACIÓN): Generación de audio robusta
-def _generate_audio_chunk_from_text(text_chunk, voice_id):
-    logging.info(f"Generando audio para el trozo: '{text_chunk[:50]}...' con voz '{voice_id}'.")
-    ssml_script = f"<speak>{text_chunk}<break time='800ms'/></speak>"
-    
-    synthesis_input = texttospeech.SynthesisInput(ssml=ssml_script)
-    language_code = '-'.join(voice_id.split('-', 2)[:2])
-    voice = texttospeech.VoiceSelectionParams(language_code=language_code, name=voice_id)
-    audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
-    
-    @retry_on_failure(retries=3, delay=5)
-    def call_tts_api():
-        return text_to_speech_client.synthesize_speech(
-            input=synthesis_input, voice=voice, audio_config=audio_config
-        )
-        
-    response = call_tts_api()
-    return response.audio_content
-
+# ✅ ENDPOINT ACTUALIZADO: Lógica de audio simplificada, sin SSML complejo.
 @app.route('/api/generate-full-audio', methods=['POST'])
 def generate_full_audio():
     data = request.get_json()
     plain_text_script = data.get('script')
     voice_id = data.get('voice', 'es-US-Neural2-A')
     
-    if not plain_text_script:
+    if not plain_text_script or not plain_text_script.strip():
         return jsonify({"error": "El guion de texto es requerido"}), 400
-        
+    
     try:
-        paragraphs = [p.strip() for p in plain_text_script.split('\n') if p.strip()]
-        if not paragraphs:
-             return jsonify({"error": "El guion está vacío o no tiene párrafos."}), 400
-
-        logging.info(f"Guion dividido en {len(paragraphs)} párrafos para procesar con el método robusto.")
+        logging.info(f"Generando audio desde texto plano para la voz: {voice_id}")
         
-        audio_chunks = []
-        for i, p in enumerate(paragraphs):
-            logging.info(f"Procesando párrafo {i+1}/{len(paragraphs)}")
-            try:
-                audio_bytes = _generate_audio_chunk_from_text(p, voice_id)
-                segment = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-                audio_chunks.append(segment)
-            except Exception as e:
-                logging.error(f"Fallo al generar audio para el párrafo: '{p[:50]}...'. Error: {e}", exc_info=True)
-                continue
-
-        if not audio_chunks:
-            return jsonify({"error": "No se pudo generar ningún segmento de audio."}), 500
-
-        logging.info("Concatenando todos los segmentos de audio...")
-        final_audio = sum(audio_chunks, AudioSegment.empty())
+        # Ya no se le pide a la IA que cree SSML.
+        # Simplemente envolvemos el texto plano en las etiquetas <speak> para la API de TTS.
+        # Esto es robusto y evita cualquier error de ritmo o formato.
+        ssml_script = f"<speak>{plain_text_script}</speak>"
         
-        final_audio_buffer = io.BytesIO()
-        final_audio.export(final_audio_buffer, format="mp3")
-        final_audio_buffer.seek(0)
-
-        logging.info("Subiendo el archivo de audio final a Google Cloud Storage.")
-        public_url = upload_to_gcs(
-            final_audio_buffer.getvalue(), 
-            f"audio/full_audio_{uuid.uuid4()}.mp3", 
-            'audio/mpeg'
-        )
-        
+        # Llamamos a la API de TTS con el texto limpio y envuelto.
+        public_url = _generate_audio_with_api(ssml_script, voice_id)
         return jsonify({"audioUrl": public_url})
 
     except Exception as e:
-        logging.error(f"Error catastrófico en generate_full_audio: {e}", exc_info=True)
+        logging.error(f"Error en generate_full_audio: {e}", exc_info=True)
         return jsonify({"error": f"No se pudo generar el audio completo: {str(e)}"}), 500
 
 @app.route('/api/generate-seo', methods=['POST'])
 def generate_seo():
-    # (Sin cambios)
     try:
         data = request.get_json()
         guion = data.get('guion')
@@ -368,21 +324,18 @@ def generate_seo():
 
 @app.route('/api/voice-sample', methods=['POST'])
 def generate_voice_sample():
-    # Se modifica para usar la nueva función de chunk, aunque no es estrictamente necesario
     data = request.get_json()
     voice_id = data.get('voice')
     if not voice_id: return jsonify({"error": "Se requiere un ID de voz"}), 400
     try:
-        sample_text = "Hola, esta es una prueba de la voz seleccionada para la narración."
-        audio_content = _generate_audio_chunk_from_text(sample_text, voice_id)
-        public_url = upload_to_gcs(audio_content, f"audio/sample_{uuid.uuid4()}.mp3", 'audio/mpeg')
+        sample_ssml = "<speak>Hola, esta es una prueba de la voz seleccionada para la narración.</speak>"
+        public_url = _generate_audio_with_api(sample_ssml, voice_id)
         return jsonify({"audioUrl": public_url})
     except Exception as e:
         logging.error("Error al generar muestra de voz: %s", e)
         return jsonify({"error": f"No se pudo generar la muestra de voz: {str(e)}"}), 500
 
-# --- 6. EJECUCIÓN DEL SERVIDOR (Sin cambios) ---
+# --- 6. EJECUCIÓN DEL SERVIDOR ---
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=False)
-    
